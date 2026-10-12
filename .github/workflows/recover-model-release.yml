@@ -31,36 +31,61 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download completed model archives without decompression
-        uses: actions/download-artifact@v8
-        with:
-          pattern: 'AK3_*.zip'
-          path: release-assets
-          merge-multiple: true
-          skip-decompress: true
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.source_run_id }}
+      - name: Download completed build artifacts with bounded requests
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          mkdir -p release-assets downloaded-manager downloaded-susfs
+          tmp=$(mktemp -d)
+          trap 'rm -rf "$tmp"' EXIT
 
-      - name: Download completed ZSU manager artifacts
-        uses: actions/download-artifact@v8
-        with:
-          pattern: 'ZSU-Manager*'
-          path: downloaded-manager
-          merge-multiple: true
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.source_run_id }}
+          # Request pages serially, then fetch each selected artifact serially.
+          # The standard multi-artifact downloader burst hit GitHub's secondary API limit.
+          gh api --retry 5 --retry-delay 3 "repos/$REPO_OWNER/$REPO_NAME/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100&page=1" > "$tmp/page1.json"
+          gh api --retry 5 --retry-delay 3 "repos/$REPO_OWNER/$REPO_NAME/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100&page=2" > "$tmp/page2.json"
+          jq -s '[.[].artifacts[] | select(.expired == false and (.name | (startswith("AK3_") or startswith("ZSU-Manager") or startswith("susfs-"))))] | unique_by(.id)' "$tmp/page1.json" "$tmp/page2.json" > "$tmp/artifacts.json"
 
-      - name: Download completed SUSFS support artifact
-        uses: actions/download-artifact@v8
-        with:
-          pattern: 'susfs-*'
-          path: downloaded-susfs
-          merge-multiple: true
-          github-token: ${{ secrets.GITHUB_TOKEN }}
-          repository: ${{ github.repository }}
-          run-id: ${{ inputs.source_run_id }}
+          expected_kernels=$(jq '[.[] | select(.name | startswith("AK3_"))] | length' "$tmp/artifacts.json")
+          if [ "$expected_kernels" -ne 158 ]; then
+            echo "::error::Expected 158 unexpired model artifacts, found $expected_kernels"
+            exit 1
+          fi
+
+          while IFS=$'\t' read -r artifact_id artifact_name; do
+            case "$artifact_name" in
+              AK3_*.zip) destination=release-assets ;;
+              ZSU-Manager*) destination=downloaded-manager ;;
+              susfs-*) destination=downloaded-susfs ;;
+              *) continue ;;
+            esac
+            outer="$tmp/$artifact_id.zip"
+            echo "Downloading $artifact_name ($artifact_id)"
+            downloaded=false
+            for attempt in 1 2 3 4 5 6; do
+              if gh api --retry 2 --retry-delay 3 "repos/$REPO_OWNER/$REPO_NAME/actions/artifacts/$artifact_id/zip" > "$outer"; then
+                downloaded=true
+                break
+              fi
+              sleep $((attempt * 5))
+            done
+            if [ "$downloaded" != true ]; then
+              echo "::error::Failed to download artifact $artifact_name after retries"
+              exit 1
+            fi
+            entries=$(unzip -Z1 "$outer")
+            if [ -z "$entries" ]; then
+              echo "::error::Artifact archive is empty: $artifact_name"
+              exit 1
+            fi
+            while IFS= read -r inner; do
+              [ -n "$inner" ] || continue
+              unzip -p "$outer" "$inner" > "$destination/$(basename "$inner")"
+            done <<< "$entries"
+            rm -f "$outer"
+            sleep 1
+          done < <(jq -r '.[] | [.id,.name] | @tsv' "$tmp/artifacts.json")
 
       - name: Assemble and validate release assets
         shell: bash
