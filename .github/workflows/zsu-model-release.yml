@@ -192,8 +192,8 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
-      # Avoid saturating GitLab/AOSP downloads across model runners.
-      max-parallel: 4
+      # Match the reference run's 19-way model-build throughput.
+      max-parallel: 19
       matrix: ${{ fromJSON(needs.plan-model-build.outputs.matrix) }}
     name: build (${{ matrix.model }}, ${{ matrix.os_version }}, ${{ matrix.kernel_full_version }})
     steps:
