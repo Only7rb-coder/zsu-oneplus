@@ -1,0 +1,281 @@
+name: GetManager
+
+# 适配 Node.js 24
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: write  # Allow writing to repository contents (for pushing tags)
+  actions: read   # Allows triggering actions
+
+on:
+  workflow_call: # This allows this workflow to be called from another workflow
+    outputs:
+      susVer:
+        description: "The fetched SUSFS version number"
+        value: ${{ jobs.get_ksu_manager.outputs.susVer }}
+
+      ksuVer:
+        description: "The calculated KSU version number"
+        value: ${{ jobs.get_ksu_manager.outputs.ksuVer }}
+
+jobs:
+  get_ksu_manager:
+    runs-on: ubuntu-latest
+    outputs:
+      # 输出1: ZSU manager 的实际版本标签（从 APK 文件名读取）
+      ksuVer: ${{ steps.manager_version.outputs.kversion }}
+      # 输出2: SUSFS版本号
+      susVer: ${{ steps.get_version.outputs.sversion }}
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_HARDLINK: "true"
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+    steps:
+      - name: 🧐 Debug Workflow Caller Context
+        run: |
+          echo "==================== DEBUG CONTEXT ===================="
+          echo " "
+          echo "EVENT NAME: ${{ github.event_name }}"
+          echo " "
+          echo "--- CALLER INFORMATION ---"
+          echo "  - Caller Repository: ${{ github.caller_repository }}"
+          echo "  - Caller Workflow:   ${{ github.caller_workflow }}"
+          echo "  - Caller User:       ${{ github.triggering_actor }}"
+          echo " "
+          echo "--- WORKFLOW & JOB INFORMATION ---"
+          echo "  - Current Workflow:  ${{ github.workflow }}"
+          echo "  - Current Job ID:    ${{ github.job }}"
+          echo "  - Current Run ID:    ${{ github.run_id }}"
+          echo "  - Current Run Number:${{ github.run_number }}"
+          echo " "
+          echo "--- GIT REFERENCE INFORMATION ---"
+          echo "  - Git Ref:           ${{ github.ref }}"
+          echo "  - Ref Type:          ${{ github.ref_type }}"
+          echo " "
+          echo "======================================================="
+          
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y git curl jq
+
+      - name: 获取 KSU & SUSFS 版本
+        id: get_version
+        run: |
+          echo "This is the ZSU variant"
+          git clone https://github.com/Only7rb-coder/ZSU.git KernelSU
+
+          cd KernelSU
+
+          # 计算KSU版本号
+          KSU_GIT_VERSION=$(git rev-list --count HEAD)
+          KSU_VERSION=$((30700 + KSU_GIT_VERSION))
+          echo $KSU_VERSION
+          echo "KSU_VERSION=$KSU_VERSION" >> $GITHUB_ENV
+
+          # 计算SUSFS版本号
+          INFO="https://gitlab.com/simonpunk/susfs4ksu/-/raw/gki-android14-6.1/ksu_module_susfs/module.prop\?ref_type\=heads"
+          SUS_VERSION=$(curl -s $INFO | awk -F '=' '$1 == "version" { print $2 }')
+          if [ "$SUS_VERSION" != "v2.3.0" ]; then
+            echo "::error::Expected SUSFS v2.3.0, got ${SUS_VERSION:-unknown}"
+            exit 1
+          fi
+          echo $SUS_VERSION
+
+          # 导出这两个值给release
+          echo "kversion=$KSU_VERSION" >> $GITHUB_OUTPUT
+          echo "sversion=$SUS_VERSION" >> $GITHUB_OUTPUT
+
+      - name: 添加 KernelSU (legacy artifact lookup disabled)
+        id: add_KSU_legacy
+        if: ${{ false }}
+        continue-on-error: true
+        run: |
+          echo "ZSU..."
+          REPO="Only7rb-coder/ZSU"
+          # ZSU CI publishes `manager` and `manager-spoofed` artifacts.
+          KSUM="manager"
+          FILENAME="build-manager.yml"
+          
+          # 初始化
+          NUMBER=0
+          DOWNLOAD_LIST=""
+
+          echo "开始查找包含 'manager' 产物的构建..."
+          while true; do
+            echo "--------------------------------------------------"
+            echo "正在检查第 ${NUMBER} 个历史构建 (0代表最新)..."
+
+            if [ "$NUMBER" -ge 9 ]; then
+              echo "查找九次仍然失败，跳出循环。"
+              break
+            fi
+
+            BUILD_ID=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/$REPO/actions/workflows/$FILENAME/runs?status=success" |
+              jq -r '.workflow_runs['"$NUMBER"'].id')
+
+            echo "找到构建 ID: $BUILD_ID"
+
+            ARTIFACTS=$(curl -s -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" \
+              "https://api.github.com/repos/$REPO/actions/runs/$BUILD_ID/artifacts")
+
+            result=$(echo "$ARTIFACTS" | jq -r '.artifacts[] | select(.name | contains("'"$KSUM"'")) | .name')
+
+            if [ -z "$result" ]; then
+              echo "没有找到包含 '$KSUM' 的项"
+              NUMBER=$((NUMBER + 1))
+            else
+              echo "$result"
+              DOWNLOAD_LIST=$(echo "$ARTIFACTS" | jq -r '.artifacts[] | select(.name | contains("'"$KSUM"'")) | "\(.name)\t\(.archive_download_url)"')
+              break
+            fi
+          done
+         
+          if [ -z "$DOWNLOAD_LIST" ]; then
+            echo "未获取到可用的 Manager artifact 下载地址列表。"
+            exit 1
+          fi
+          
+          # 下载并解压所有 Manager 产物
+          echo "$DOWNLOAD_LIST" | while IFS=$'\t' read -r NAME URL; do
+            SAFE_NAME=$(echo "$NAME" | tr '/ ' '__')
+            ZIP_NAME="ZSU-${SAFE_NAME}(${{ env.KSU_VERSION }}).zip"
+            echo "下载 $NAME -> $ZIP_NAME"
+            curl -L -H "Authorization: token ${{ secrets.GITHUB_TOKEN }}" -o "$ZIP_NAME" "$URL"
+            mkdir -p "manager-artifacts/$SAFE_NAME"
+            unzip -o "$ZIP_NAME" -d "manager-artifacts/$SAFE_NAME"
+            # 兼容旧版 CI：将旧 Custom_widgets 文件名统一改为 ZSU。
+            find "manager-artifacts/$SAFE_NAME" -type f -name 'Custom_widgets_*.apk' -print0 | while IFS= read -r -d '' APK; do
+              NEW_APK="$(dirname "$APK")/$(basename "$APK" | sed 's/^Custom_widgets_/ZSU_/')"
+              mv -f "$APK" "$NEW_APK"
+            done
+            rm -rf "$ZIP_NAME"
+          done
+
+      - name: 下载当前 ZSU Manager release
+        id: add_KSU
+        run: |
+          set -euo pipefail
+          EXPECTED_RELEASE_TAG='v1.4.0'
+          EXPECTED_MANAGER_VERSION='1.3.19_33341'
+          mkdir -p manager-artifacts
+          latest_tag=$(gh release view --repo Only7rb-coder/zsu --json tagName --jq '.tagName')
+          if [ "$latest_tag" != "$EXPECTED_RELEASE_TAG" ]; then
+            echo "::error::ZSU manager latest release changed: expected $EXPECTED_RELEASE_TAG, got $latest_tag. Update the compatibility pin before building."
+            exit 1
+          fi
+          gh release download "$EXPECTED_RELEASE_TAG" --repo Only7rb-coder/zsu \
+            --pattern "ZSU_${EXPECTED_MANAGER_VERSION}-release.apk" \
+            --pattern "ZSU_${EXPECTED_MANAGER_VERSION}-release-spoofed.apk" \
+            --dir manager-artifacts
+          apk_count=$(find manager-artifacts -maxdepth 1 -type f -name '*.apk' | wc -l)
+          if [ "$apk_count" -ne 2 ]; then
+            echo "::error::Expected exactly two ZSU Manager $EXPECTED_MANAGER_VERSION APKs, found $apk_count"
+            exit 1
+          fi
+          find manager-artifacts -maxdepth 1 -type f -name '*.apk' -print
+
+      - name: 读取管理器实际版本
+        id: manager_version
+        if: steps.add_KSU.outcome == 'success'
+        run: |
+          set -euo pipefail
+          APK=$(find manager-artifacts -type f -name '*.apk' ! -name '*spoofed*' | sort | head -n 1)
+          if [ -z "$APK" ]; then
+            APK=$(find manager-artifacts -type f -name '*.apk' | sort | head -n 1)
+          fi
+          if [ -z "$APK" ]; then
+            echo '::error::未找到 ZSU manager APK，无法读取实际版本'
+            exit 1
+          fi
+          FILE=$(basename "$APK")
+          LABEL=$(printf '%s' "$FILE" | sed -E 's/^(ZSU|Custom_widgets)_//; s/-release\.apk$//')
+          if [ -z "$LABEL" ] || [ "$LABEL" = "$FILE" ]; then
+            echo "::error::无法从 APK 文件名读取 manager 版本: $FILE"
+            exit 1
+          fi
+          if [ "$LABEL" != '1.3.19_33341' ]; then
+            echo "::error::Incompatible ZSU manager version: expected 1.3.19_33341, got $LABEL"
+            exit 1
+          fi
+          echo "ZSU manager version: $LABEL"
+          echo "KSU_VERSION=$LABEL" >> "$GITHUB_ENV"
+          echo "kversion=$LABEL" >> "$GITHUB_OUTPUT"
+
+      - name: Prepare distinct ZSU manager release assets
+        if: steps.add_KSU.outcome == 'success'
+        run: |
+          set -euo pipefail
+          normal_apk=$(find manager-artifacts -type f -name '*.apk' ! -path '*spoofed*' | sort | head -n 1)
+          spoofed_apk=$(find manager-artifacts -type f -name '*.apk' -path '*spoofed*' | sort | head -n 1)
+          if [ -z "$normal_apk" ] || [ -z "$spoofed_apk" ]; then
+            echo '::error::Both normal and spoofed ZSU manager APKs are required'
+            exit 1
+          fi
+          mkdir -p manager-release-assets
+          cp -f "$normal_apk" "manager-release-assets/ZSU_${KSU_VERSION}-release.apk"
+          cp -f "$spoofed_apk" "manager-release-assets/ZSU_${KSU_VERSION}-spoofed-release.apk"
+          test -s "manager-release-assets/ZSU_${KSU_VERSION}-release.apk"
+          test -s "manager-release-assets/ZSU_${KSU_VERSION}-spoofed-release.apk"
+
+      - name: 添加 SUSFS 模块
+        id: add_SUSFS
+        run: |
+          set -euo pipefail
+          # Upstream CI artifacts are short-lived and are not currently
+          # exposed through the Actions API. Build from a pinned source tag.
+          SUSFS_REF='v1.5.2+'
+          echo "SUSFS_NAME=source-${SUSFS_REF}" >> "$GITHUB_ENV"
+          git clone --depth=1 --branch "$SUSFS_REF" \
+            https://github.com/sidex15/susfs4ksu-module.git susfs-source
+          rm -rf susfs-source/.git susfs-source/.github
+          mkdir -p susfs-temp
+          cp -a susfs-source/. susfs-temp/
+          (cd susfs-temp && zip -qr ../susfs-module.zip .)
+          rm -rf susfs-source susfs-temp
+          mkdir -p susfs-module
+          mv susfs-module.zip susfs-module/ksu_module_susfs.zip
+          module=$(find susfs-module -maxdepth 1 -type f -name '*.zip' -print -quit)
+          if [ -z "$module" ] || ! unzip -tqq "$module"; then
+            echo "::error::The SUSFS support module artifact is missing or invalid"
+            exit 1
+          fi
+          module_prop=$(unzip -Z1 "$module" | grep -E '(^|/)module\.prop$' | head -n 1 || true)
+          if [ -z "$module_prop" ]; then
+            echo "::error::The SUSFS support module has no module.prop"
+            exit 1
+          fi
+          module_prop_text=$(unzip -p "$module" "$module_prop")
+          module_id=$(awk -F= '$1 == "id" { print $2; exit }' <<< "$module_prop_text")
+          module_version=$(awk -F= '$1 == "version" { print $2; exit }' <<< "$module_prop_text")
+          if [ "$module_id" != "susfs4ksu" ] || [[ ! "$module_version" == v* ]]; then
+            echo "::error::Unexpected SUSFS module metadata: id=${module_id:-missing}, version=${module_version:-missing}"
+            exit 1
+          fi
+          if ! unzip -Z1 "$module" | grep -Eq '(^|/)tools/ksu_susfs_arm64$'; then
+            echo "::error::The SUSFS support module has no arm64 helper"
+            exit 1
+          fi
+          echo "Validated SUSFS module: id=$module_id version=$module_version"
+
+      - name: Notify on failure
+        if: steps.add_KSU.outcome == 'failure'
+        run: echo "下载CI构建的KSU失败!"
+
+      - name: 上传APK
+        if: steps.add_KSU.outcome == 'success'
+        uses: actions/upload-artifact@v6
+        with:
+          name: ZSU-Manager(${{ steps.manager_version.outputs.kversion }})
+          path: manager-release-assets/*.apk
+
+      - name: 上传SUSFS模块
+        if: steps.add_SUSFS.outcome == 'success'
+        uses: actions/upload-artifact@v6
+        with:
+          name: susfs-${{ env.SUSFS_NAME }}
+          path: ./susfs-module/*

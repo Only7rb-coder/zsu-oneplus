@@ -1,0 +1,25 @@
+# ZSU ONEPLUS SUSFS Release TODO
+
+- [x] Initialize the ccache environment before model cache restoration.
+- [x] Resolve ZSU symbol dependencies from the KernelSU-Next source tree.
+- [x] Validate all 158 model configurations and ZSU-root build targets locally.
+- [x] Stop the focused single-model verification run before restarting the all-model release.
+- [x] Restart the complete 158-model stable ZSU release matrix.
+- [x] Monitor every model build and address any shared release-blocking error.
+- [x] Verify 158 model-named AnyKernel packages plus normal and spoofed ZSU manager APKs in the final release.
+- [x] Prevent ccache final-statistics logging from copying `ccache.log` onto itself and failing completed model builds.
+- [x] Verify the repository is permanently public and that hosted Actions runners can start jobs.
+- [x] Rerun the complete 158-model stable ZSU release workflow using public-repository Actions capacity.
+- [x] Install `dos2unix` in the shared model-build dependency step so HMBIRD-enabled models do not fail during patch application.
+- [x] Make the Android 15 6.6 KernelSU-Next SELinux policy helper symbols externally linkable for HMBIRD-enabled model builds.
+- [x] Diagnose and correct the shared Android 16 / 6.12 model-build failure affecting the final OOS16 configurations.
+- [x] Install `libdw-dev` for Android 16 / 6.12 builds so `gendwarfksyms` can find the required `dwarf.h` host header.
+- [x] Show every model's complete detected kernel version across all supported tracks in workflow-job and release-facing labels instead of the shortened Android/KMI label.
+- [x] Run the corrected Android 16 / Linux 6.12 model group before retrying the full 158-model release.
+- [x] Adapt Android 16 / Linux 6.12 SUSFS `getname_flags()` calls to each synced vendor tree's two-argument API before compiling the targeted group again.
+- [x] Correct the Android 16 `getname_flags()` compatibility implementation so it updates every matching SUSFS source file and verifies the replacement.
+- [x] Verify and repair the ZSU linked `kernel/include/uapi` path when an Android 16 source tree cannot resolve `app_profile.h` during compilation.
+- [x] Propagate KernelSU-Next include paths to nested sources so Android 16 builds resolve `uapi/app_profile.h` and `klog.h` consistently.
+- [x] Pass the verified KernelSU-Next root and include paths through the build-wide preprocessor flags for every Android 16 compilation unit.
+- [x] Expose the KernelSU-Next SELinux policy helper symbols required by Android 16 / Linux 6.12 HMBIRD final linking.
+- [x] Correct release artifact handling so successful model package archives remain intact for publication and can be collected reliably.
