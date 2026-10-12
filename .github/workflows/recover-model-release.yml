@@ -40,11 +40,21 @@ jobs:
           mkdir -p release-assets downloaded-manager downloaded-susfs
           tmp=$(mktemp -d)
           trap 'rm -rf "$tmp"' EXIT
+          api_get() {
+            local endpoint="$1" output="$2"
+            for attempt in 1 2 3 4 5 6; do
+              if gh api "$endpoint" > "$output"; then
+                return 0
+              fi
+              sleep $((attempt * 5))
+            done
+            return 1
+          }
 
           # Request pages serially, then fetch each selected artifact serially.
           # The standard multi-artifact downloader burst hit GitHub's secondary API limit.
-          gh api --retry 5 --retry-delay 3 "repos/$REPO_OWNER/$REPO_NAME/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100&page=1" > "$tmp/page1.json"
-          gh api --retry 5 --retry-delay 3 "repos/$REPO_OWNER/$REPO_NAME/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100&page=2" > "$tmp/page2.json"
+          api_get "repos/$REPO_OWNER/$REPO_NAME/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100&page=1" "$tmp/page1.json"
+          api_get "repos/$REPO_OWNER/$REPO_NAME/actions/runs/$SOURCE_RUN_ID/artifacts?per_page=100&page=2" "$tmp/page2.json"
           jq -s '[.[].artifacts[] | select(.expired == false and (.name | (startswith("AK3_") or startswith("ZSU-Manager") or startswith("susfs-"))))] | unique_by(.id)' "$tmp/page1.json" "$tmp/page2.json" > "$tmp/artifacts.json"
 
           expected_kernels=$(jq '[.[] | select(.name | startswith("AK3_"))] | length' "$tmp/artifacts.json")
@@ -62,15 +72,7 @@ jobs:
             esac
             outer="$tmp/$artifact_id.zip"
             echo "Downloading $artifact_name ($artifact_id)"
-            downloaded=false
-            for attempt in 1 2 3 4 5 6; do
-              if gh api --retry 2 --retry-delay 3 "repos/$REPO_OWNER/$REPO_NAME/actions/artifacts/$artifact_id/zip" > "$outer"; then
-                downloaded=true
-                break
-              fi
-              sleep $((attempt * 5))
-            done
-            if [ "$downloaded" != true ]; then
+            if ! api_get "repos/$REPO_OWNER/$REPO_NAME/actions/artifacts/$artifact_id/zip" "$outer"; then
               echo "::error::Failed to download artifact $artifact_name after retries"
               exit 1
             fi
